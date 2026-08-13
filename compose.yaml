@@ -1,0 +1,129 @@
+# podbay self-host — the one-command install.
+#
+#   docker compose up -d           # PULLS prebuilt images, starts everything (~1-2 min)
+#   → open http://localhost:8080
+#
+# No local builds: images come from ghcr (override the registry/tag with PODBAY_APP_IMAGE /
+# PODBAY_POD_IMAGE). To build from source instead (devs, or an air-gapped host), add the build
+# overlay:  docker compose -f compose.yaml -f compose.build.yaml up -d --build
+#
+# What runs: Postgres (state) · web (dashboard) · serve (terminal gateway + provisioner) · proxy
+# (Caddy: ONE origin — /pods/* WebSockets → gateway, all else → web) · podbase (pulls the pod image
+# so first launch is instant) · migrate (one-shot schema). Pods are SIBLING containers on the host
+# daemon (web/serve mount /var/run/docker.sock) and join podbay-pods so the control plane reaches
+# them by name.
+name: podbay
+
+x-app-image: &app-image ${PODBAY_APP_IMAGE:-ghcr.io/velsa/pod-app:latest}
+
+x-app-env: &podbay-env
+  PODBAY_EDITION: oss
+  PODBAY_DB: pg
+  DATABASE_URL: postgres://postgres@db:5432/podbay
+  PODBAY_LOCAL_PROVIDER: "1"
+  PODBAY_DEFAULT_PROVIDER: local
+  PODBAY_LOCAL_NETWORK: podbay-pods
+  PODBAY_LOCAL_IMAGE: ${PODBAY_POD_IMAGE:-ghcr.io/velsa/pod-base:latest}
+  PODBAY_ENVIRONMENTS_ROOT: /app/environments
+  # Terminal WS goes to THIS page's origin (/pods/* → Caddy → serve). No baked URL.
+  PODBAY_GATEWAY_SAMEORIGIN: "1"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust # loopback-only exposure via the compose network
+      POSTGRES_DB: podbay
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d podbay"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    image: *app-image
+    command: [node, packages/selfhost/migrate-pg.mjs]
+    environment:
+      DATABASE_URL: postgres://postgres@db:5432/podbay
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    image: *app-image
+    # Next standalone server (output: "standalone"; `next start` refuses that config).
+    command: [node, apps/web/.next/standalone/apps/web/server.js]
+    environment:
+      <<: *podbay-env
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - appdata:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [default, pods]
+    restart: unless-stopped
+
+  serve:
+    image: *app-image
+    command: [node, packages/selfhost/podbay.mjs, serve]
+    environment:
+      <<: *podbay-env
+      PODBAY_GATEWAY_HOST: 0.0.0.0 # Caddy dials serve:3001 across the compose network
+      PODBAY_GATEWAY_PORT: "3001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - appdata:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [default, pods]
+    restart: unless-stopped
+
+  # Pulls the pod-base image at `up` so the FIRST pod launch is instant (LocalProvider `docker run`s
+  # it on the HOST daemon). Runs `true` and exits — its only job is caching the image on the host.
+  podbase:
+    image: ${PODBAY_POD_IMAGE:-ghcr.io/velsa/pod-base:latest}
+    command: ["true"]
+    restart: "no"
+
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - "${PODBAY_PORT:-8080}:8080"
+    # Caddyfile is INLINE (below) so this compose file is fully self-contained — fetchable and
+    # runnable as a single file, no companion download.
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    depends_on: [web, serve]
+    restart: unless-stopped
+
+# One front door: /pods/* (terminal WebSockets) → the serve daemon's gateway; everything else → web.
+# VPS with a domain? Replace `:8080` with your domain and publish 80/443 on `proxy` — Caddy then
+# provisions HTTPS automatically.
+configs:
+  caddyfile:
+    content: |
+      :8080 {
+      	handle /pods/* {
+      		reverse_proxy serve:3001
+      	}
+      	handle {
+      		reverse_proxy web:3000
+      	}
+      }
+
+networks:
+  pods:
+    name: podbay-pods
+
+volumes:
+  pgdata:
+  appdata:
