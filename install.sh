@@ -35,10 +35,16 @@ if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null
   die "port $PORT is already in use. Set PODBAY_PORT=<a free port> and re-run (or free it)."
 fi
 
-# ── Compose file: use one next to this script (repo checkout), else download ──────────────────
-SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
+# ── Compose file: use one next to a REAL install.sh (repo checkout), else download ────────────
+# With `curl … | sh`, $0 is normally `sh`; resolving dirname($0) would incorrectly treat the
+# CALLER'S current directory as the script directory and could start an unrelated compose.yaml.
+# Only trust an adjacent file when this is actually being run as an install.sh file.
+SELF_DIR=""
+case "$0" in
+  install.sh|*/install.sh) SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)" ;;
+esac
 mkdir -p "$DIR"
-if [ -f "$SELF_DIR/compose.yaml" ]; then
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/compose.yaml" ]; then
   cp "$SELF_DIR/compose.yaml" "$DIR/compose.yaml"; say "Using compose.yaml from $SELF_DIR"
 else
   say "Fetching compose.yaml…"
@@ -47,15 +53,44 @@ fi
 
 # ── Up (pulls images on first run) ────────────────────────────────────────────────────────────
 say "Starting podbay on :$PORT (first run pulls the images — a few minutes)…"
-( cd "$DIR" && PODBAY_PORT="$PORT" docker compose up -d )
+if ( cd "$DIR" && PODBAY_PORT="$PORT" docker compose up -d ); then
+  : # started
+else
+  # Classify the failure. The classic gotcha on a PUBLIC image is a STALE 'docker login ghcr.io':
+  # Docker then presents expired/invalid credentials and the registry answers "denied" instead of
+  # falling back to an anonymous pull. Detect that specifically and tell the user how to fix it.
+  app_img=$(grep -oE 'ghcr\.io/[A-Za-z0-9._/-]*pod-app[A-Za-z0-9._:@/-]*' "$DIR/compose.yaml" 2>/dev/null | head -1)
+  app_img="${app_img:-ghcr.io/velsa/pod-app:latest}"
+  if docker pull "$app_img" 2>&1 | grep -qiE 'denied|unauthorized'; then
+    die "image pull was DENIED for $app_img — but that image is public.
 
+This almost always means a stale 'docker login ghcr.io' on THIS machine: Docker sends expired
+credentials, and ghcr rejects them rather than pulling anonymously. Clear it and re-run:
+
+    docker logout ghcr.io
+    curl -fsSL ${PODBAY_COMPOSE_URL%/compose.yaml}/install.sh | sh"
+  fi
+  die "startup failed — see the errors above, resolve them, and re-run this installer."
+fi
+
+# Best-effort primary non-loopback IP, so a REMOTE box shows a reachable URL instead of a useless
+# "localhost" (which, on a VPS, just means the VPS itself). May be a private/NAT address behind a
+# load balancer — hence the "or your domain" note.
+host_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -z "$host_ip" ] && host_ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+
+say ""
+say "✅ podbay is up."
+say "   On this machine:   http://localhost:$PORT"
+if [ -n "$host_ip" ] && [ "$host_ip" != "127.0.0.1" ]; then
+  say "   From elsewhere:     http://$host_ip:$PORT   (open port $PORT in the firewall / security group)"
+fi
 cat <<EOF
-
-✅ podbay is up → http://localhost:$PORT
-   Create a pod, sign in with your Claude account, and you're in.
+   First visit shows a one-time owner setup (pick a password) — then it's your dashboard.
 
    Manage it (from ./$DIR):
      docker compose logs -f serve     # daemon / provisioning
      docker compose down              # stop   ·   down -v also wipes state
-   VPS: put it behind your domain (edit the Caddy block in compose.yaml) + a login gate.
+   Remote installs are experimental. Keep the dashboard private; see the public deployment guide.
+   To pre-set the owner (skip the first-run setup window), set PODBAY_AUTH_PASSWORD before starting.
 EOF

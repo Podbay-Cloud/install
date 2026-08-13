@@ -27,6 +27,13 @@ x-app-env: &podbay-env
   PODBAY_ENVIRONMENTS_ROOT: /app/environments
   # Terminal WS goes to THIS page's origin (/pods/* → Caddy → serve). No baked URL.
   PODBAY_GATEWAY_SAMEORIGIN: "1"
+  # Auth gate (self-host-auth-gate). BETTER_AUTH_SECRET signs the session cookie web sets + serve
+  # validates; start.sh generates+persists it on /data when unset (so both share one). The two
+  # PODBAY_AUTH_* vars are an OPTIONAL pre-seed for a public VPS (no first-run claim window) — leave
+  # them unset to use the first-run setup screen instead.
+  BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+  PODBAY_AUTH_PASSWORD: ${PODBAY_AUTH_PASSWORD:-}
+  PODBAY_AUTH_EMAIL: ${PODBAY_AUTH_EMAIL:-}
 
 services:
   db:
