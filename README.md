@@ -1,11 +1,11 @@
 # Podbay, self-hosted
 
-**Give Claude Code a persistent computer on hardware you control.**
+**Keep Claude working on hardware you control.**
 
-Podbay runs Claude Code in a dedicated Docker container with your project, tools, terminal, and
-live app preview. Open it in your browser or continue from the Claude desktop and mobile apps. It
-uses your existing Claude Pro or Max subscription, so you do not need an Anthropic API key or pay
-Podbay a separate agent-usage bill.
+Podbay runs Claude Code in a persistent Docker workspace with your project, tools, services, and
+data. Sign in once, then work from the official Claude apps on desktop or mobile while the pod keeps
+the computer—and your work—running. It uses your existing Claude Pro or Max subscription, so you do
+not need an Anthropic API key or pay Podbay a separate agent-usage bill.
 
 ![The Podbay self-hosted dashboard showing guided playbooks and development workspaces](assets/podbay-selfhost-dashboard.png)
 
@@ -18,10 +18,14 @@ Podbay a separate agent-usage bill.
 
 - **A workspace that stays put.** Your project, tools, and agent live together in one pod instead
   of being recreated for every session.
-- **Claude where you already use it.** Work in the browser terminal, then continue through Claude
-  Remote Control on desktop or mobile.
-- **A live development environment.** Each pod can run a dev server and gives you a direct preview
-  link.
+- **Claude in the official apps.** Podbay starts Claude Remote Control after sign-in, so the same
+  pod session is available from Claude on desktop and mobile.
+- **A capable development environment.** Install packages, run Postgres, keep workers and dev
+  servers running, schedule recurring agent work, and open the result through an app preview.
+- **Work that continues.** Ask Claude to keep an app and its workers available, run a report every
+  week, watch a source for meaningful changes, or recover a service that stopped.
+- **Project access without secrets in chat.** Add credentials in the dashboard when Claude asks for
+  them, then let the project use that access without pasting values into the conversation.
 - **Control over the machine.** Pods run as Docker containers on your computer or server, using
   its storage and network connection.
 
@@ -41,10 +45,14 @@ the Podbay images. First startup takes longer while those images download.
 When it finishes:
 
 1. Open [http://localhost:8080](http://localhost:8080).
-2. Create the single owner login. This protects the dashboard and browser terminal.
+2. Create the single owner login. This protects the dashboard and administrative terminal.
 3. Select **Create a pod** and choose a playbook or workspace.
 4. Follow the sign-in link and enter the code from your Claude account.
-5. Open the pod to use its terminal, app preview, or Claude Remote Control session.
+5. Once Claude is signed in, open the pod session from the official Claude desktop or mobile app.
+
+From then on, Claude is the main interface. Return to the Podbay dashboard when you want to manage
+the pod, add secrets, inspect health, or open an app preview. A browser terminal remains available
+as an advanced recovery tool.
 
 <details>
 <summary><strong>Prefer to inspect the files and run Docker Compose yourself?</strong></summary>
@@ -62,7 +70,7 @@ docker compose up -d
 
 ## Know before you deploy
 
-- **This is a single-owner edition.** The built-in login protects the dashboard and browser
+- **This is a single-owner edition.** The built-in login protects the dashboard and administrative
   terminal; it is not a multi-user access-control system.
 - **Local or private-network use is still recommended.** Remote deployment is experimental, pod
   ports need Docker-aware firewall rules, and app-preview links currently work only on the Docker
@@ -76,6 +84,8 @@ docker compose up -d
 
 ## Documentation
 
+- [Podbay docs](https://podbay.cloud/docs) — what Claude can accomplish, how to ask for recurring
+  work, and how to manage previews, skills, secrets, and recovery
 - [Deployment](docs/DEPLOYMENT.md) — supported hosts, ports, private access, remote-host guidance,
   and configuration
 - [Operations](docs/OPERATIONS.md) — logs, updates, backups, stopping, uninstalling, and common

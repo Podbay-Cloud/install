@@ -112,14 +112,20 @@ services:
     depends_on: [web, serve]
     restart: unless-stopped
 
-# One front door: /pods/* (terminal WebSockets) → the serve daemon's gateway; everything else → web.
-# VPS with a domain? Replace `:8080` with your domain and publish 80/443 on `proxy` — Caddy then
-# provisions HTTPS automatically.
+# One front door. `/pods/*` is shared: the terminal WebSocket (Upgrade) goes to the serve daemon's
+# gateway, but the SAME path also serves the full-page raw-terminal route from the web app on a plain
+# GET — so split by the Upgrade header (cloud keeps these on separate hosts; self-host is one origin).
+# Everything else → web. VPS with a domain? Replace `:8080` with your domain and publish 80/443 on
+# `proxy` — Caddy then provisions HTTPS automatically.
 configs:
   caddyfile:
     content: |
       :8080 {
-      	handle /pods/* {
+      	@podsws {
+      		path /pods/*
+      		header Connection *Upgrade*
+      	}
+      	handle @podsws {
       		reverse_proxy serve:3001
       	}
       	handle {
