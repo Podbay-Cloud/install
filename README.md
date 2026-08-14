@@ -7,7 +7,7 @@ data. Sign in once, then work from the official Claude apps on desktop or mobile
 the computer—and your work—running. It uses your existing Claude Pro or Max subscription, so you do
 not need an Anthropic API key or pay Podbay a separate agent-usage bill.
 
-![The Podbay self-hosted dashboard showing guided playbooks and development workspaces](assets/podbay-selfhost-dashboard.png)
+![A Podbay dashboard with a running workspace, live app preview, Claude Remote Control, and pod settings](assets/podbay-selfhost-dashboard.png)
 
 > [!IMPORTANT]
 > **Podbay Self-Hosted is an early alpha.** It is released for local experiments and early feedback,
