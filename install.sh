@@ -164,6 +164,10 @@ case "$DEPLOY_MODE" in
     say "   DNS — create these A records pointing at THIS server, then open the dashboard:"
     say "     $DASHBOARD_HOST   →  ${pub_ip:-<this server's public IP>}"
     say "     *.$PUBLIC_BASE   →  ${pub_ip:-<this server's public IP>}"
+    say ""
+    say "   ⚠ If your DNS is behind Cloudflare's PROXY (orange-cloud), set these two records to"
+    say "     DNS-only (grey-cloud) — the proxy intercepts port 80 and breaks Let's Encrypt's"
+    say "     HTTP-01 validation, so certificates won't issue. Grey-cloud, or use a DNS-01 setup."
     ;;
   ip)
     say "   Dashboard:  https://$DASHBOARD_HOST"
