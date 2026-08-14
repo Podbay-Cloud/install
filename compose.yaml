@@ -25,6 +25,12 @@ x-app-env: &podbay-env
   PODBAY_LOCAL_NETWORK: podbay-pods
   PODBAY_LOCAL_IMAGE: ${PODBAY_POD_IMAGE:-ghcr.io/velsa/pod-base:latest}
   PODBAY_ENVIRONMENTS_ROOT: /app/environments
+  # Reachability mode (self-host-public-previews): LocalProvider (in web + serve) reads these so a
+  # pod's preview URL is the front-door subdomain in ip/domain mode, not a host loopback. Default
+  # local ⇒ unchanged. The install wizard sets these (+ the proxy's 80/443 override) for a public host.
+  PODBAY_DEPLOY_MODE: ${PODBAY_DEPLOY_MODE:-local}
+  PODBAY_PUBLIC_BASE: ${PODBAY_PUBLIC_BASE:-}
+  PODBAY_DASHBOARD_HOST: ${PODBAY_DASHBOARD_HOST:-}
   # Terminal WS goes to THIS page's origin (/pods/* → Caddy → serve). No baked URL.
   PODBAY_GATEWAY_SAMEORIGIN: "1"
   # Auth gate (self-host-auth-gate). BETTER_AUTH_SECRET signs the session cookie web sets + serve
@@ -102,36 +108,69 @@ services:
 
   proxy:
     image: caddy:2-alpine
+    # Ports are mode-driven. LOCAL (default): the dashboard on ${PODBAY_PORT:-8080}. PUBLIC (ip/domain):
+    # the install wizard writes a compose.override.yaml mapping 80:80 + 443:443 so Caddy can serve the
+    # dashboard + pod-preview subdomains with automatic HTTPS. Container listens per the rendered config.
     ports:
-      - "${PODBAY_PORT:-8080}:8080"
-    # Caddyfile is INLINE (below) so this compose file is fully self-contained — fetchable and
-    # runnable as a single file, no companion download.
+      - "${PODBAY_PORT:-8080}:${PODBAY_PROXY_PORT:-8080}"
+    # The Caddyfile is RENDERED at start from the deployment mode (self-host-public-previews): local
+    # keeps the single :8080 front door; ip/domain add per-pod preview subdomains (<id>.<base> →
+    # podbay-<id>:3000) with on-demand TLS. Script is inline so the compose stays self-contained.
+    environment:
+      PODBAY_DEPLOY_MODE: ${PODBAY_DEPLOY_MODE:-local}
+      PODBAY_PUBLIC_BASE: ${PODBAY_PUBLIC_BASE:-}
+      PODBAY_DASHBOARD_HOST: ${PODBAY_DASHBOARD_HOST:-}
     configs:
-      - source: caddyfile
-        target: /etc/caddy/Caddyfile
+      - source: caddy-render
+        target: /etc/caddy/render.sh
+    entrypoint: ["sh", "-c", "sh /etc/caddy/render.sh > /etc/caddy/Caddyfile && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+    volumes:
+      - caddy-data:/data
+    # BOTH networks: `default` reaches web/serve; `pods` (podbay-pods) reaches the pod containers
+    # (podbay-<id>:3000) so ip/domain/proxy modes can route per-pod preview subdomains to them.
+    networks: [default, pods]
     depends_on: [web, serve]
     restart: unless-stopped
 
-# One front door. `/pods/*` is shared: the terminal WebSocket (Upgrade) goes to the serve daemon's
-# gateway, but the SAME path also serves the full-page raw-terminal route from the web app on a plain
-# GET — so split by the Upgrade header (cloud keeps these on separate hosts; self-host is one origin).
-# Everything else → web. VPS with a domain? Replace `:8080` with your domain and publish 80/443 on
-# `proxy` — Caddy then provisions HTTPS automatically.
+# The front door, rendered by mode. `/pods/*` is shared: the terminal WebSocket (Upgrade) goes to the
+# serve daemon's gateway, the SAME path serves the full-page raw-terminal route from web on a plain GET
+# — split by the Upgrade header. Everything else → web. In ip/domain mode each pod also gets a preview
+# subdomain (<id>.<base>) proxied to its dev server, with Caddy provisioning HTTPS automatically and
+# an `ask` guard so only real pod/dashboard hostnames get certs.
 configs:
-  caddyfile:
+  caddy-render:
+    # NB: `$$` escapes compose's own interpolation so these reach the SHELL verbatim and are
+    # evaluated at container start (reading the proxy's PODBAY_* environment), not at compose parse.
     content: |
-      :8080 {
-      	@podsws {
-      		path /pods/*
-      		header Connection *Upgrade*
-      	}
-      	handle @podsws {
-      		reverse_proxy serve:3001
-      	}
-      	handle {
-      		reverse_proxy web:3000
-      	}
+      #!/bin/sh
+      MODE="$${PODBAY_DEPLOY_MODE:-local}"
+      BASE="$${PODBAY_PUBLIC_BASE:-}"
+      DASH="$${PODBAY_DASHBOARD_HOST:-}"
+      podsplit() {
+      	printf '\t@podsws {\n\t\tpath /pods/*\n\t\theader Connection *Upgrade*\n\t}\n'
+      	printf '\thandle @podsws {\n\t\treverse_proxy serve:3001\n\t}\n'
+      	printf '\thandle {\n\t\treverse_proxy web:3000\n\t}\n'
       }
+      if [ "$$MODE" = "local" ] || [ -z "$$BASE" ]; then
+      	printf ':8080 {\n'; podsplit; printf '}\n'
+      elif [ "$$MODE" = "proxy" ]; then
+      	# Behind an EXISTING front proxy that terminates TLS and forwards by Host to :8080. Same
+      	# Host-based routing, but plain HTTP on 8080 (no cert handling here — the front proxy owns it).
+      	printf 'http://%s:8080 {\n' "$$DASH"; podsplit; printf '}\n\n'
+      	printf 'http://*.%s:8080 {\n' "$$BASE"
+      	printf '\t@pod header_regexp podid Host ^([a-z0-9][a-z0-9-]*)[.]\n'
+      	printf '\treverse_proxy @pod podbay-{re.podid.1}:3000\n'
+      	printf '}\n\n'
+      	printf ':8080 {\n'; podsplit; printf '}\n'
+      else
+      	printf '{\n\ton_demand_tls {\n\t\task http://web:3000/api/selfhost/tls-check\n\t}\n}\n\n'
+      	printf '%s {\n' "$$DASH"; podsplit; printf '}\n\n'
+      	printf '*.%s {\n' "$$BASE"
+      	printf '\ttls {\n\t\ton_demand\n\t}\n'
+      	printf '\t@pod header_regexp podid Host ^([a-z0-9][a-z0-9-]*)[.]\n'
+      	printf '\treverse_proxy @pod podbay-{re.podid.1}:3000\n'
+      	printf '}\n'
+      fi
 
 networks:
   pods:
@@ -140,3 +179,4 @@ networks:
 volumes:
   pgdata:
   appdata:
+  caddy-data:

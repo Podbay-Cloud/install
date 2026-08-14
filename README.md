@@ -42,9 +42,21 @@ curl -fsSL https://raw.githubusercontent.com/podbay-cloud/install/main/install.s
 The installer checks your machine, downloads the Compose configuration into `./podbay`, and pulls
 the Podbay images. First startup takes longer while those images download.
 
-When it finishes:
+When it finishes, the installer prints the **real URL for your setup** — it auto-detects where it's
+running:
 
-1. Open [http://localhost:8080](http://localhost:8080).
+- **Your laptop / a private box** → `http://localhost:8080`.
+- **A public server, no domain** → a public HTTPS URL via [sslip.io](https://sslip.io), e.g.
+  `https://<your-ip>.sslip.io` — pods get their own `https://<pod>.<your-ip>.sslip.io` preview, with
+  automatic Let's Encrypt certificates. Just open ports 80 and 443.
+- **A public server with a domain** → dashboard + per-pod preview subdomains on your domain, HTTPS
+  automatic (set `PODBAY_DOMAIN=yourdomain`; the installer prints the two DNS records to add).
+- **A server already running nginx/Caddy/Traefik on 80/443** → podbay coexists behind it and prints
+  a snippet to add to that proxy — no port fight.
+
+Then:
+
+1. Open the URL the installer printed (or [http://localhost:8080](http://localhost:8080) locally).
 2. Create the single owner login. This protects the dashboard and administrative terminal.
 3. Select **Create a pod** and choose a playbook or workspace.
 4. Follow the sign-in link and enter the code from your Claude account.

@@ -31,8 +31,68 @@ avail_gb=$(df -Pk "$PWD" 2>/dev/null | awk 'NR==2 { printf "%d", $4/1024/1024 }'
 if [ -n "$avail_gb" ] && [ "$avail_gb" -lt 6 ]; then
   say "  ⚠ only ${avail_gb} GB free here — the images need ~5 GB (plus room for pods); free some space or you may hit 'no space left'."
 fi
-if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  die "port $PORT is already in use. Set PODBAY_PORT=<a free port> and re-run (or free it)."
+# ── Network mode: how will this be reached? (self-host-public-previews) ────────────────────────
+# local  — localhost:$PORT (private/dev; default when there's no public IP).
+# ip     — public host, NO domain → per-pod preview subdomains at <id>.<ip>.sslip.io with automatic
+#          HTTPS. Zero DNS setup; just open 80/443. The default when a public IP is detected.
+# domain — your own domain → dashboard + <id>.pods.<domain> previews with automatic HTTPS.
+# raw-ip — opt-out of sslip.io: previews on http://<public-ip>:<port> (no TLS, per-pod ports).
+# Auto-detected; override with PODBAY_DEPLOY_MODE / PODBAY_DOMAIN / PODBAY_PUBLIC_IP.
+pub_ip="${PODBAY_PUBLIC_IP:-}"
+if [ -z "$pub_ip" ]; then
+  pub_ip=$(curl -fsS --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+  [ -z "$pub_ip" ] && pub_ip=$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)
+fi
+# Only trust a PUBLIC IPv4 (a private/NAT address isn't reachable and would produce a dead URL).
+case "$pub_ip" in
+  *[!0-9.]*|"") pub_ip="" ;;
+  10.*|127.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*) pub_ip="" ;;
+esac
+
+MODE="${PODBAY_DEPLOY_MODE:-}"
+DOMAIN="${PODBAY_DOMAIN:-}"
+[ -z "$MODE" ] && { if [ -n "$DOMAIN" ]; then MODE=domain; elif [ -n "$pub_ip" ]; then MODE=ip; else MODE=local; fi; }
+
+# `proxy` is a modifier of a public intent (ip/domain): podbay sits BEHIND an existing 80/443 proxy.
+# Requested explicitly (PODBAY_DEPLOY_MODE=proxy, needs PODBAY_DOMAIN or a public IP for the host
+# scheme) OR chosen automatically when 80/443 is already taken (so we coexist instead of dying).
+want_proxy=0; [ "$MODE" = proxy ] && { want_proxy=1; if [ -n "$DOMAIN" ]; then MODE=domain; else MODE=ip; fi; }
+
+DEPLOY_MODE=local; PUBLIC_BASE=""; DASHBOARD_HOST=""; PUBLIC=0
+case "$MODE" in
+  domain)
+    [ -n "$DOMAIN" ] || die "domain mode needs PODBAY_DOMAIN=<your-domain>."
+    DASHBOARD_HOST="podbay.$DOMAIN"; PUBLIC_BASE="pods.$DOMAIN"; PUBLIC=1 ;;
+  ip)
+    [ -n "$pub_ip" ] || die "ip mode needs a public IP — none detected. Set PODBAY_PUBLIC_IP or use PODBAY_DOMAIN."
+    DASHBOARD_HOST="$pub_ip.sslip.io"; PUBLIC_BASE="$pub_ip.sslip.io"; PUBLIC=1 ;;
+  raw-ip|local) DEPLOY_MODE=local ;;
+  *) die "unknown PODBAY_DEPLOY_MODE='$MODE' (use local | ip | domain | proxy | raw-ip)." ;;
+esac
+
+# Is something ALREADY on 80/443 (an existing nginx/Caddy/Traefik)? Then coexist behind it.
+in_use_80_443=0
+if [ "$PUBLIC" -eq 1 ]; then
+  for p in 80 443; do
+    if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then in_use_80_443=1; fi
+  done
+  [ "$in_use_80_443" -eq 1 ] && want_proxy=1
+fi
+
+if [ "$PUBLIC" -eq 1 ] && [ "$want_proxy" -eq 1 ]; then
+  # BEHIND-PROXY: podbay stays on $PORT (HTTP); the existing front proxy terminates TLS and forwards
+  # <dashboard>/<*.base> to it. We DON'T grab 80/443 and emit a snippet for the front proxy below.
+  DEPLOY_MODE=proxy; PUBLIC=0; BEHIND=1
+  if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    die "port $PORT is in use — set PODBAY_PORT=<free port> and re-run (podbay needs one local port behind your proxy)."
+  fi
+elif [ "$PUBLIC" -eq 1 ]; then
+  DEPLOY_MODE="$MODE"; BEHIND=0  # podbay owns 80/443 (checked free above via in_use loop)
+else
+  BEHIND=0
+  if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    die "port $PORT is already in use — set PODBAY_PORT=<free port> and re-run (or free it)."
+  fi
 fi
 
 # ── Compose file: use one next to a REAL install.sh (repo checkout), else download ────────────
@@ -51,9 +111,30 @@ else
   curl -fsSL "$COMPOSE_URL" -o "$DIR/compose.yaml" || die "couldn't download the compose file from $COMPOSE_URL"
 fi
 
+# Deployment config compose auto-reads (.env), plus a proxy-ports override for public modes so Caddy
+# can serve 80/443 with automatic HTTPS. Local mode keeps the single $PORT front door.
+{
+  echo "PODBAY_DEPLOY_MODE=$DEPLOY_MODE"
+  echo "PODBAY_PUBLIC_BASE=$PUBLIC_BASE"
+  echo "PODBAY_DASHBOARD_HOST=$DASHBOARD_HOST"
+  [ "$PUBLIC" -eq 1 ] || echo "PODBAY_PORT=$PORT"
+} > "$DIR/.env"
+if [ "$PUBLIC" -eq 1 ]; then
+  cat > "$DIR/compose.override.yaml" <<'YAML'
+services:
+  proxy:
+    ports: !override
+      - "80:80"
+      - "443:443"
+YAML
+else
+  rm -f "$DIR/compose.override.yaml" 2>/dev/null || true
+fi
+
 # ── Up (pulls images on first run) ────────────────────────────────────────────────────────────
-say "Starting podbay on :$PORT (first run pulls the images — a few minutes)…"
-if ( cd "$DIR" && PODBAY_PORT="$PORT" docker compose up -d ); then
+if [ "$PUBLIC" -eq 1 ]; then say "Starting podbay ($DEPLOY_MODE mode) on 80/443 (first run pulls the images — a few minutes)…"
+else say "Starting podbay on :$PORT (first run pulls the images — a few minutes)…"; fi
+if ( cd "$DIR" && docker compose up -d ); then
   : # started
 else
   # Classify the failure. The classic gotcha on a PUBLIC image is a STALE 'docker login ghcr.io':
@@ -73,17 +154,74 @@ credentials, and ghcr rejects them rather than pulling anonymously. Clear it and
   die "startup failed — see the errors above, resolve them, and re-run this installer."
 fi
 
-# Best-effort primary non-loopback IP, so a REMOTE box shows a reachable URL instead of a useless
-# "localhost" (which, on a VPS, just means the VPS itself). May be a private/NAT address behind a
-# load balancer — hence the "or your domain" note.
-host_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-[ -z "$host_ip" ] && host_ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
-
 say ""
 say "✅ podbay is up."
-say "   On this machine:   http://localhost:$PORT"
-if [ -n "$host_ip" ] && [ "$host_ip" != "127.0.0.1" ]; then
-  say "   From elsewhere:     http://$host_ip:$PORT   (open port $PORT in the firewall / security group)"
+case "$DEPLOY_MODE" in
+  domain)
+    say "   Dashboard:  https://$DASHBOARD_HOST"
+    say "   Previews:   https://<pod>.$PUBLIC_BASE   (automatic HTTPS)"
+    say ""
+    say "   DNS — create these A records pointing at THIS server, then open the dashboard:"
+    say "     $DASHBOARD_HOST   →  ${pub_ip:-<this server's public IP>}"
+    say "     *.$PUBLIC_BASE   →  ${pub_ip:-<this server's public IP>}"
+    ;;
+  ip)
+    say "   Dashboard:  https://$DASHBOARD_HOST"
+    say "   Previews:   https://<pod>.$PUBLIC_BASE   (automatic HTTPS, no DNS setup — via sslip.io)"
+    ;;
+  proxy)
+    say "   podbay is running on http://localhost:$PORT, BEHIND your existing web server (80/443 was"
+    say "   already in use). Dashboard: https://$DASHBOARD_HOST · Previews: https://<pod>.$PUBLIC_BASE"
+    say ""
+    # The single wildcard covers BOTH the dashboard and every pod preview — podbay's own proxy
+    # routes them apart by Host. Upstream differs by whether your front proxy is a host process or a
+    # container (a container can't reach the host's localhost:$PORT).
+    if command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | grep -qi docker; then
+      up="podbay-proxy-1:8080"
+      say "   ➜ Your front proxy looks CONTAINERIZED. Connect it to podbay's network once:"
+      say "       docker network connect podbay_default <your-proxy-container>"
+    else
+      up="localhost:$PORT"
+      say "   ➜ Add this to your front proxy (Caddy shown), then reload it:"
+    fi
+    say ""
+    say "       {"
+    say "           on_demand_tls { ask http://$up/api/selfhost/tls-check }"
+    say "       }"
+    say "       *.$PUBLIC_BASE, $DASHBOARD_HOST {"
+    say "           tls { on_demand }"
+    say "           reverse_proxy $up"
+    say "       }"
+    say ""
+    case "$PUBLIC_BASE" in
+      *.sslip.io) : ;;  # sslip.io resolves automatically
+      *) say "   DNS: point $DASHBOARD_HOST and *.$PUBLIC_BASE at ${pub_ip:-this server} (A records)." ;;
+    esac
+    say "   (nginx/Traefik work too — reverse-proxy those hostnames to $up, preserving the Host header.)"
+    say "   Tip: if your proxy's config is a bind-mounted file, RESTART it (not just reload) to pick up edits."
+    ;;
+  *)
+    say "   On this machine:   http://localhost:$PORT"
+    [ -n "$pub_ip" ] && say "   From elsewhere:    http://$pub_ip:$PORT   (open port $PORT; pod previews are host-local in this mode)"
+    ;;
+esac
+
+if [ "$PUBLIC" -eq 1 ]; then
+  # Best-effort OS firewall open (needs root); otherwise print the exact command. We can ONLY touch
+  # the host firewall — a cloud security group is invisible from in here (flagged below, honestly).
+  fw_hint=""
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
+    if [ "$(id -u)" = 0 ]; then ufw allow 80/tcp >/dev/null 2>&1 || true; ufw allow 443/tcp >/dev/null 2>&1 || true
+    else fw_hint="sudo ufw allow 80/tcp && sudo ufw allow 443/tcp"; fi
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -qi running; then
+    if [ "$(id -u)" = 0 ]; then firewall-cmd --add-service=http --add-service=https --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true
+    else fw_hint="sudo firewall-cmd --add-service={http,https} --permanent && sudo firewall-cmd --reload"; fi
+  fi
+  [ -n "$fw_hint" ] && { say ""; say "   ⚠ Open the host firewall (I couldn't — not root):  $fw_hint"; }
+  say ""
+  say "   I can't see your CLOUD provider's firewall / security group — it's outside this machine."
+  say "   If the URL doesn't load, open TCP 80 + 443 there. HTTPS is issued on the first request to"
+  say "   each new hostname, so the very first load of a pod's preview can take a few seconds."
 fi
 cat <<EOF
    First visit shows a one-time owner setup (pick a password) — then it's your dashboard.
